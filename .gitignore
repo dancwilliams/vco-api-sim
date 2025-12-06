@@ -1,0 +1,15 @@
+# Python/venv
+.venv/
+__pycache__/
+*.pyc
+
+# uv / build
+.uv/
+uv.lock
+
+# OS noise
+.DS_Store
+
+# Local OpenAPI specs (bring your own)
+vco-api-json/vco_api.json
+vco-api-json/vco_api
