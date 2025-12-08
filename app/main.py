@@ -129,6 +129,31 @@ SAMPLE_IDS: Dict[str, str] = {
     "appId": "app-1",
 }
 
+# Multiple stub edges to simulate a fleet.
+STUB_EDGES = [
+    {
+        "enterpriseLogicalId": "ent-1",
+        "edgeLogicalId": "edge-1",
+        "name": "Edge One",
+        "city": "Austin",
+        "country": "US",
+    },
+    {
+        "enterpriseLogicalId": "ent-1",
+        "edgeLogicalId": "edge-2",
+        "name": "Edge Two",
+        "city": "Denver",
+        "country": "US",
+    },
+    {
+        "enterpriseLogicalId": "ent-1",
+        "edgeLogicalId": "edge-3",
+        "name": "Edge Three",
+        "city": "London",
+        "country": "UK",
+    },
+]
+
 CUSTOM_SEEDS: Dict[str, Any] = {
     "/api/sdwan/v2/enterprises/{enterpriseLogicalId}/edges/{edgeLogicalId}/healthStats": {
         "_href": "/api/sdwan/v2/enterprises/{enterpriseLogicalId}/edges/{edgeLogicalId}/healthStats",
@@ -164,20 +189,24 @@ def _edge_default_payload(path: str, path_params: Dict[str, Any]) -> Any:
     enterprise_id = path_params.get("enterpriseLogicalId", "ent-1")
 
     edge_stub = {
-        "_href": path.format(**{k: v for k, v in path_params.items()}),
-        "enterpriseId": enterprise_id,
         "logicalId": logical_id,
         "name": f"Edge {logical_id}",
-        "modelNumber": "VCE-1000",
-        "serialNumber": f"VC-{logical_id}",
-        "buildNumber": "6.0.0",
-        "activationKey": f"ACT-{logical_id}",
         "alertsEnabled": True,
-        "site": {"name": "Main Office", "city": "Austin", "country": "US"},
     }
 
     if path.endswith("/edges/"):
-        return {"_href": path, "total": 1, "data": [edge_stub]}
+        return {
+            "data": [
+                {
+                    **edge_stub,
+                    "logicalId": stub["edgeLogicalId"],
+                    "name": stub.get("name", edge_stub["name"]),
+                    "alertsEnabled": True,
+                }
+                for stub in STUB_EDGES
+                if stub.get("enterpriseLogicalId") == enterprise_id
+            ],
+        }
 
     if path.endswith("/deviceSettings"):
         return {"edge": edge_stub, "deviceSettings": {"lan": [], "wan": []}}
@@ -261,19 +290,36 @@ def seed_store() -> None:
     """Seed the in-memory store with deterministic dummy data for GETs."""
     for path, path_item in spec.get("paths", {}).items():
         path_params_names = _extract_path_params(path)
-        path_params = {name: SAMPLE_IDS.get(name, "sample-value") for name in path_params_names}
+        base_path_params = {name: SAMPLE_IDS.get(name, "sample-value") for name in path_params_names}
         for method, operation in path_item.items():
             if method in {"parameters"}:
                 continue
             if method.lower() != "get":
                 continue
-            if path in CUSTOM_SEEDS:
-                payload = _render_custom_seed(CUSTOM_SEEDS[path], path_params)
-                store.set(path, "resource", path_params, payload)
+
+            # Seed all edge-specific GET endpoints for each stub edge.
+            if "/edges/" in path and "edgeLogicalId" in path_params_names:
+                for stub in STUB_EDGES:
+                    if "enterpriseLogicalId" in path_params_names and stub["enterpriseLogicalId"] != base_path_params.get("enterpriseLogicalId", stub["enterpriseLogicalId"]):
+                        pass  # allow multiple enterprises; will set per stub below
+                    path_params = dict(base_path_params)
+                    path_params["enterpriseLogicalId"] = stub["enterpriseLogicalId"]
+                    path_params["edgeLogicalId"] = stub["edgeLogicalId"]
+                    if path in CUSTOM_SEEDS:
+                        payload = _render_custom_seed(CUSTOM_SEEDS[path], path_params)
+                    else:
+                        payload = _edge_default_payload(path, path_params)
+                    store.set(path, "resource", path_params, payload)
                 continue
+
+            if path in CUSTOM_SEEDS:
+                payload = _render_custom_seed(CUSTOM_SEEDS[path], base_path_params)
+                store.set(path, "resource", base_path_params, payload)
+                continue
+
             if "/edges/" in path:
-                payload = _edge_default_payload(path, path_params)
-                store.set(path, "resource", path_params, payload)
+                payload = _edge_default_payload(path, base_path_params)
+                store.set(path, "resource", base_path_params, payload)
                 continue
 
             response_schema, status_code = _choose_response_schema(operation)
@@ -282,8 +328,8 @@ def seed_store() -> None:
             payload = example_from_schema(response_schema, resolver)
             if payload is None:
                 continue
-            payload = _inject_known_ids(payload, path_params)
-            store.set(path, "resource", path_params, payload)
+            payload = _inject_known_ids(payload, base_path_params)
+            store.set(path, "resource", base_path_params, payload)
 
 
 def register_routes() -> None:
