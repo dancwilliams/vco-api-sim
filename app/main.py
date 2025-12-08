@@ -129,28 +129,34 @@ SAMPLE_IDS: Dict[str, str] = {
     "appId": "app-1",
 }
 
-# Multiple stub edges to simulate a fleet.
+# Multiple stub edges to simulate a fleet (single enterprise).
 STUB_EDGES = [
     {
         "enterpriseLogicalId": "ent-1",
         "edgeLogicalId": "edge-1",
-        "name": "Edge One",
+        "name": "Edge One (healthy)",
         "city": "Austin",
         "country": "US",
+        "alertsEnabled": True,
+        "status": "up",
     },
     {
         "enterpriseLogicalId": "ent-1",
         "edgeLogicalId": "edge-2",
-        "name": "Edge Two",
+        "name": "Edge Two (degraded)",
         "city": "Denver",
         "country": "US",
+        "alertsEnabled": True,
+        "status": "degraded",
     },
     {
         "enterpriseLogicalId": "ent-1",
         "edgeLogicalId": "edge-3",
-        "name": "Edge Three",
-        "city": "London",
-        "country": "UK",
+        "name": "Edge Three (down)",
+        "city": "Seattle",
+        "country": "US",
+        "alertsEnabled": False,
+        "status": "down",
     },
 ]
 
@@ -188,20 +194,24 @@ def _edge_default_payload(path: str, path_params: Dict[str, Any]) -> Any:
     logical_id = path_params.get("edgeLogicalId", "edge-1")
     enterprise_id = path_params.get("enterpriseLogicalId", "ent-1")
 
+    stub_match = next(
+        (s for s in STUB_EDGES if s["edgeLogicalId"] == logical_id and s["enterpriseLogicalId"] == enterprise_id),
+        None,
+    )
+
     edge_stub = {
         "logicalId": logical_id,
-        "name": f"Edge {logical_id}",
-        "alertsEnabled": True,
+        "name": stub_match.get("name", f"Edge {logical_id}") if stub_match else f"Edge {logical_id}",
+        "alertsEnabled": stub_match.get("alertsEnabled", True) if stub_match else True,
     }
 
     if path.endswith("/edges/"):
         return {
             "data": [
                 {
-                    **edge_stub,
                     "logicalId": stub["edgeLogicalId"],
                     "name": stub.get("name", edge_stub["name"]),
-                    "alertsEnabled": True,
+                    "alertsEnabled": stub.get("alertsEnabled", True),
                 }
                 for stub in STUB_EDGES
                 if stub.get("enterpriseLogicalId") == enterprise_id
