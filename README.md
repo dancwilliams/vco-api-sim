@@ -1,43 +1,272 @@
 # VCO API Simulator
 
-A lightweight FastAPI + Pydantic simulator that serves the VMware VeloCloud Orchestrator (VCO) API using the provided OpenAPI document in `vco-api-json/vco_api`.
+A comprehensive FastAPI + Pydantic simulator for the Arista VeloCloud Orchestrator (VCO) API. Supports both the V1 JSON-RPC API (340 endpoints) and V2 REST API (72 endpoints) with realistic fake data generation and stateful entity relationships.
 
-## Quick start
+## Features
 
-```bash
-# provide your own VCO OpenAPI JSON (set VCO_SPEC_PATH to that file)
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-set VCO_SPEC_PATH=C:\path\to\vco_api.json
-uvicorn app.main:app --reload
-```
+- **Dual API Support**: Serves both V1 (`/portal/rest/*`) and V2 (`/api/sdwan/v2/*`) APIs simultaneously
+- **Realistic Data Generation**: Uses Faker to generate realistic company names, IP addresses, locations, and SD-WAN metrics
+- **Stateful Relationships**: Maintains proper entity relationships (Enterprise → Edge → Link)
+- **Time Series Data**: Generates realistic time series for health stats, link stats, and flow stats
+- **Configurable Seeding**: Control the number of enterprises, edges, and links via environment variables
+- **Dynamic Route Generation**: Routes are generated from OpenAPI specs at startup
 
-Then open `http://127.0.0.1:8000/docs` (Swagger) or `http://127.0.0.1:8000/redoc`. The OpenAPI served is exactly the VCO spec you supplied. The repository intentionally does not ship the VCO spec—bring your own to avoid redistribution concerns.
+## Quick Start
 
-### Using uv (optional)
-
-If you prefer the `uv` workflow:
+### Using uv (recommended)
 
 ```bash
-uv venv
-./.venv/Scripts/activate
-uv sync  # uses pyproject.toml / uv.lock if present
-set VCO_SPEC_PATH=C:\path\to\vco_api.json
+# Clone the repository
+git clone <repo-url>
+cd vco-api-sim
+
+# Install dependencies
+uv sync
+
+# Start the simulator
 uv run uvicorn app.main:app --reload
 ```
 
-## Simulator behavior
+### Using pip
 
-- Routes are generated dynamically from the OpenAPI file (55 paths, 314 schemas in your spec).
-- Path/query parameters are typed based on the schema and parsed by FastAPI/Pydantic.
-- Request bodies are accepted as JSON. Basic validation is driven by typing; structure is not enforced beyond that.
-- Responses are built from schema/examples/defaults in the spec; otherwise placeholder data is returned. GET routes are pre-seeded with dummy data keyed to sample IDs (`enterpriseLogicalId=ent-1`, `edgeLogicalId=edge-1`, `profileLogicalId=prof-1`, `appId=app-1`). All `/edges/` GET endpoints have basic stub payloads (list/detail plus health/link/flow/path stats).
-- A simple in-memory store keeps the last payload sent to `POST`/`PUT`/`PATCH` and returns it on subsequent `GET` for the same resource. `DELETE` clears it. If you request with other IDs, you'll see example-based responses populated with your path params.
-- Health check at `/health` returns `{"status": "ok"}`.
+```bash
+# Create virtual environment
+python -m venv .venv
+source .venv/bin/activate  # Linux/macOS
+# or: .venv\Scripts\activate  # Windows
 
-## Customizing
+# Install dependencies
+pip install -e .
 
-- Point `VCO_SPEC_PATH` at a modified spec to change routes without code changes.
-- Extend `app/schema_utils.py` if you want richer sample generation.
-- Swap `MemoryStore` in `app/store.py` for a persistent backend if you need state across runs.
+# Start the simulator
+uvicorn app.main:app --reload
+```
+
+### Access the API
+
+- **Swagger UI**: http://localhost:8000/docs
+- **ReDoc**: http://localhost:8000/redoc
+- **Health Check**: http://localhost:8000/health
+- **Status**: http://localhost:8000/status
+
+## API Endpoints
+
+### Core Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Health check - returns `{"status": "ok"}` |
+| `/status` | GET | Shows count of seeded entities |
+| `/portal/` | POST | Legacy JSON-RPC endpoint |
+
+### V1 API (JSON-RPC Style)
+
+All V1 endpoints use POST method at `/portal/rest/*`. Examples:
+
+```bash
+# Login
+curl -X POST http://localhost:8000/portal/rest/login/enterpriseLogin \
+  -H "Content-Type: application/json" \
+  -d '{"username": "admin", "password": "secret"}'
+
+# Get enterprise edges
+curl -X POST http://localhost:8000/portal/rest/enterprise/getEnterpriseEdges \
+  -H "Content-Type: application/json" \
+  -d '{"enterpriseId": 1}'
+
+# Get edge health
+curl -X POST http://localhost:8000/portal/rest/metrics/getEdgeStatusMetrics \
+  -H "Content-Type: application/json" \
+  -d '{"enterpriseId": 1, "edgeId": 1}'
+```
+
+### V2 API (REST Style)
+
+V2 endpoints follow REST conventions at `/api/sdwan/v2/*`. Examples:
+
+```bash
+# List enterprises
+curl http://localhost:8000/api/sdwan/v2/enterprises/
+
+# Get enterprise edges (replace {enterpriseLogicalId} with actual ID from list)
+curl http://localhost:8000/api/sdwan/v2/enterprises/{enterpriseLogicalId}/edges/
+
+# Get edge health stats
+curl http://localhost:8000/api/sdwan/v2/enterprises/{enterpriseLogicalId}/edges/{edgeLogicalId}/healthStats
+
+# Get edge health stats time series
+curl http://localhost:8000/api/sdwan/v2/enterprises/{enterpriseLogicalId}/edges/{edgeLogicalId}/healthStats/timeSeries
+```
+
+## Configuration
+
+Configure the simulator using environment variables or a `.env` file:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VCO_V1_SPEC_PATH` | Auto-detected | Path to V1 OpenAPI spec (Swagger 2.0) |
+| `VCO_V2_SPEC_PATH` | Auto-detected | Path to V2 OpenAPI spec (OpenAPI 3.0) |
+| `VCO_SEED_ENTERPRISES` | `2` | Number of enterprises to seed |
+| `VCO_SEED_EDGES` | `5` | Number of edges per enterprise |
+| `VCO_SEED_LINKS` | `2` | Number of WAN links per edge |
+| `VCO_HOST` | `0.0.0.0` | Server bind host |
+| `VCO_PORT` | `8000` | Server bind port |
+| `VCO_DEBUG` | `false` | Enable debug mode |
+
+### Example .env file
+
+```env
+VCO_SEED_ENTERPRISES=5
+VCO_SEED_EDGES=10
+VCO_SEED_LINKS=3
+```
+
+## OpenAPI Specs
+
+The simulator automatically detects OpenAPI specs in the repository root:
+
+- `VC-SD-WAN-6.4-v1.json` - V1 API (Swagger 2.0, 340 endpoints)
+- `VC-SD-WAN-6.4-v2.json` - V2 API (OpenAPI 3.0, 55 paths → 72 routes)
+
+You can also specify custom paths via environment variables.
+
+## Data Model
+
+The simulator maintains a relational data model:
+
+```
+Enterprise (Customer)
+├── id, logicalId, name
+├── alertsEnabled, networkId
+└── edges[]
+    └── Edge
+        ├── id, logicalId, name
+        ├── edgeState (CONNECTED, DEGRADED, OFFLINE)
+        ├── modelNumber, softwareVersion, serialNumber
+        ├── site (city, state, country, lat, lon)
+        └── links[]
+            └── Link
+                ├── id, logicalId, name
+                ├── interface (GE1, GE2, LTE1, etc.)
+                ├── linkState (STABLE, STANDBY, DEAD)
+                ├── isp, ipAddress
+                └── metrics (latency, jitter, loss)
+```
+
+### Seeded Data Distribution
+
+- **Edge States**: 70% CONNECTED, 20% DEGRADED, 10% OFFLINE
+- **Link States**: Primary link STABLE (if edge healthy), others STANDBY
+- **Locations**: Random US cities (Austin, Denver, Seattle, NYC, LA, etc.)
+- **ISPs**: AT&T, Verizon, Comcast, Spectrum, CenturyLink, Cox, Frontier
+
+## Project Structure
+
+```
+app/
+├── main.py                 # FastAPI application entry point
+├── config.py               # Configuration and environment variables
+├── models/                 # Pydantic models
+│   ├── base.py             # Base models and mixins
+│   ├── enterprise.py       # Enterprise/Customer model
+│   ├── edge.py             # Edge device model
+│   ├── link.py             # WAN link model
+│   └── metrics.py          # Health/stats metrics models
+├── store/                  # Data storage layer
+│   ├── base.py             # Abstract store interface
+│   ├── memory.py           # In-memory implementation with indexes
+│   └── relationships.py    # Entity relationship manager
+├── generators/             # Fake data generation
+│   ├── factory.py          # Realistic SD-WAN data generators
+│   └── schema_generator.py # OpenAPI schema-based generation
+├── api/                    # API route handlers
+│   ├── v1/                 # V1 JSON-RPC handlers
+│   │   ├── handlers.py     # Request handlers
+│   │   └── routes.py       # Route registration
+│   └── v2/                 # V2 REST handlers
+│       ├── handlers.py     # Request handlers
+│       └── routes.py       # Route registration
+├── specs/                  # OpenAPI spec handling
+│   ├── loader.py           # Multi-spec loader
+│   └── resolver.py         # $ref resolution
+└── seeding/                # Data seeding
+    └── seed_data.py        # Initial data population
+```
+
+## Development
+
+### Install dev dependencies
+
+```bash
+uv sync --all-extras
+```
+
+### Run with auto-reload
+
+```bash
+uv run uvicorn app.main:app --reload
+```
+
+### Run tests
+
+```bash
+uv run pytest
+```
+
+### Lint code
+
+```bash
+uv run ruff check .
+uv run ruff format .
+```
+
+## Simulator Behavior
+
+### Authentication
+
+All authentication endpoints accept any credentials and return success. No actual authentication is enforced - all API calls are accepted.
+
+### Data Persistence
+
+Data is stored in-memory only. Restarting the server resets all data to the seeded state.
+
+### Response Generation
+
+1. **Stored Data**: If data exists in the store (from seeding or previous writes), it's returned
+2. **Schema Generation**: If no stored data, responses are generated from OpenAPI schemas
+3. **Realistic Defaults**: Metrics and time series use realistic SD-WAN values
+
+### Time Series
+
+Time series endpoints (`/healthStats/timeSeries`, `/linkStats/timeSeries`, etc.) generate data points at 5-minute intervals for the past hour with realistic metric values.
+
+## Examples
+
+### Get all seeded enterprises and their edges
+
+```bash
+# Get enterprises
+ENTERPRISES=$(curl -s http://localhost:8000/api/sdwan/v2/enterprises/)
+echo "$ENTERPRISES" | jq '.data[].logicalId'
+
+# Get edges for first enterprise
+ENT_ID=$(echo "$ENTERPRISES" | jq -r '.data[0].logicalId')
+curl -s "http://localhost:8000/api/sdwan/v2/enterprises/${ENT_ID}/edges/" | jq '.data'
+```
+
+### Get edge health metrics
+
+```bash
+ENT_ID="<enterprise-logical-id>"
+EDGE_ID="<edge-logical-id>"
+
+# Aggregate stats
+curl -s "http://localhost:8000/api/sdwan/v2/enterprises/${ENT_ID}/edges/${EDGE_ID}/healthStats" | jq
+
+# Time series
+curl -s "http://localhost:8000/api/sdwan/v2/enterprises/${ENT_ID}/edges/${EDGE_ID}/healthStats/timeSeries" | jq '.series[:3]'
+```
+
+## License
+
+This project is provided as-is for testing and development purposes.

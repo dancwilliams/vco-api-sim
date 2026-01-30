@@ -1,387 +1,117 @@
 from __future__ import annotations
 
-import copy
 import logging
-import re
-from typing import Any, Dict, List, Optional
+from contextlib import asynccontextmanager
+from typing import Any, Dict
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse
 
-from .schema_utils import SchemaResolver, example_from_schema
-from .spec_loader import cached_spec
-from .store import MemoryStore
+from app.api.v1.routes import register_v1_routes
+from app.api.v2.routes import register_v2_routes
+from app.config import get_settings
+from app.seeding.seed_data import seed_all
+from app.specs.loader import get_v1_spec, get_v2_spec
+from app.store.relationships import get_store
 
-
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 log = logging.getLogger("vco-sim")
 
-spec = cached_spec()
-info = spec.get("info", {})
-app = FastAPI(
-    title=info.get("title", "VCO Simulator"),
-    version=info.get("version", "0.1.0"),
-    description=info.get("description", "Mock implementation of the VCO API."),
-)
 
-resolver = SchemaResolver(spec)
-store = MemoryStore()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan handler."""
+    # Startup
+    log.info("Starting VCO API Simulator...")
 
+    v1_spec = get_v1_spec()
+    v2_spec = get_v2_spec()
 
-def _choose_response_schema(operation: Dict[str, Any]) -> tuple[Optional[Dict[str, Any]], int]:
-    responses = operation.get("responses", {}) or {}
-    chosen_code: Optional[str] = None
-    for code in ("200", "201", "202", "204", "default"):
-        if code in responses:
-            chosen_code = code
-            break
-    if chosen_code is None and responses:
-        chosen_code = next(iter(responses.keys()))
-    if chosen_code is None:
-        return None, 200
+    v1_count = 0
+    v2_count = 0
 
-    status_code = int(chosen_code) if chosen_code.isdigit() else 200
-    response_obj = responses.get(chosen_code, {})
-    content = (response_obj or {}).get("content", {})
-    media = content.get("application/json")
-    if not media:
-        for media_type, media_schema in content.items():
-            if media_type.endswith("+json"):
-                media = media_schema
-                break
-    schema = None
-    if media:
-        schema = media.get("schema")
-    return schema, status_code
+    if v1_spec:
+        v1_count = register_v1_routes(app, v1_spec)
+        log.info("Loaded V1 spec: %d paths", len(v1_spec.get("paths", {})))
+    else:
+        log.warning("V1 spec not found")
 
+    if v2_spec:
+        v2_count = register_v2_routes(app, v2_spec)
+        log.info("Loaded V2 spec: %d paths", len(v2_spec.get("paths", {})))
+    else:
+        log.warning("V2 spec not found")
 
-def _build_endpoint(
-    path: str,
-    method: str,
-    operation: Dict[str, Any],
-    path_params: List[Dict[str, Any]],
-    query_params: List[Dict[str, Any]],
-    response_schema: Optional[Dict[str, Any]],
-    default_status: int,
-) -> Any:
-    method_lower = method.lower()
+    # Seed data
+    seed_all()
 
-    async def endpoint(request: Request) -> Response:
-        captured_path_params = dict(request.path_params)
-        captured_query_params = dict(request.query_params.multi_items())
-
-        body: Any = None
-        if method_lower in {"post", "put", "patch"}:
-            try:
-                body = await request.json()
-            except Exception:
-                body = None
-
-        log.debug(
-            "Handling %s %s path_params=%s query=%s",
-            method_upper,
-            path,
-            captured_path_params,
-            captured_query_params,
-        )
-
-        if method_lower in {"post", "put", "patch"}:
-            store.set(path, "resource", captured_path_params, body)
-
-        if method_lower == "delete":
-            store.delete(path, "resource", captured_path_params)
-
-        payload: Any = None
-        if method_lower == "get":
-            payload = store.get(path, "resource", captured_path_params)
-
-        if payload is None and response_schema is not None and default_status != 204:
-            payload = example_from_schema(response_schema, resolver)
-            payload = _inject_known_ids(payload, captured_path_params)
-
-        if payload is None and "/edges/" in path:
-            payload = _edge_default_payload(path, captured_path_params)
-
-        if payload is None and default_status != 204:
-            payload = {"message": f"Mock response for {method_upper} {path}"}
-
-        if method_lower == "delete" or default_status == 204:
-            return Response(status_code=default_status)
-
-        return JSONResponse(payload, status_code=default_status)
-
-    method_upper = method.upper()
-    endpoint.__name__ = f"{method_lower}_{path.replace('/', '_').strip('_') or 'root'}"
-    return endpoint
-
-
-def _extract_path_params(path: str) -> List[str]:
-    return re.findall(r"{([^}/]+)}", path)
-
-
-SAMPLE_IDS: Dict[str, str] = {
-    "enterpriseLogicalId": "ent-1",
-    "enterpriseId": "ent-1",
-    "logicalId": "ent-1",
-    "edgeLogicalId": "edge-1",
-    "edgeId": "edge-1",
-    "profileLogicalId": "prof-1",
-    "gatewayId": "gw-1",
-    "appId": "app-1",
-}
-
-# Multiple stub edges to simulate a fleet (single enterprise).
-STUB_EDGES = [
-    {
-        "enterpriseLogicalId": "ent-1",
-        "edgeLogicalId": "edge-1",
-        "name": "Edge One (healthy)",
-        "city": "Austin",
-        "country": "US",
-        "alertsEnabled": True,
-        "status": "up",
-    },
-    {
-        "enterpriseLogicalId": "ent-1",
-        "edgeLogicalId": "edge-2",
-        "name": "Edge Two (degraded)",
-        "city": "Denver",
-        "country": "US",
-        "alertsEnabled": True,
-        "status": "degraded",
-    },
-    {
-        "enterpriseLogicalId": "ent-1",
-        "edgeLogicalId": "edge-3",
-        "name": "Edge Three (down)",
-        "city": "Seattle",
-        "country": "US",
-        "alertsEnabled": False,
-        "status": "down",
-    },
-]
-
-CUSTOM_SEEDS: Dict[str, Any] = {
-    "/api/sdwan/v2/enterprises/{enterpriseLogicalId}/edges/{edgeLogicalId}/healthStats": {
-        "_href": "/api/sdwan/v2/enterprises/{enterpriseLogicalId}/edges/{edgeLogicalId}/healthStats",
-        "total": 1,
-        "tunnelCount": {"min": 2, "max": 4, "average": 3},
-        "tunnelCountV6": {"min": 0, "max": 0, "average": 0},
-        "memoryPct": {"min": 42.1, "max": 65.5, "average": 54.3},
-        "flowCount": {"min": 120, "max": 240, "average": 180},
-        "cpuPct": {"min": 12.5, "max": 48.3, "average": 28.9},
-        "cpuCoreTemp": {"min": 55.0, "max": 73.2, "average": 64.8},
-        "handoffQueueDrops": {"min": 0, "max": 2, "average": 0.1},
-    },
-}
-
-
-def _inject_known_ids(payload: Any, path_params: Dict[str, Any]) -> Any:
-    if isinstance(payload, dict):
-        for key, value in path_params.items():
-            if key in payload and payload[key] in {None, "", "string"}:
-                payload[key] = value
-        for key, value in path_params.items():
-            if key.endswith("LogicalId") and "logicalId" in payload:
-                payload["logicalId"] = value
-            if key.endswith("Id") and "id" in payload:
-                payload["id"] = value
-    if isinstance(payload, list) and payload:
-        payload[0] = _inject_known_ids(payload[0], path_params)
-    return payload
-
-
-def _edge_default_payload(path: str, path_params: Dict[str, Any]) -> Any:
-    logical_id = path_params.get("edgeLogicalId", "edge-1")
-    enterprise_id = path_params.get("enterpriseLogicalId", "ent-1")
-
-    stub_match = next(
-        (s for s in STUB_EDGES if s["edgeLogicalId"] == logical_id and s["enterpriseLogicalId"] == enterprise_id),
-        None,
+    store = get_store()
+    log.info(
+        "VCO Simulator ready: %d V1 routes, %d V2 routes, "
+        "%d enterprises, %d edges, %d links",
+        v1_count,
+        v2_count,
+        store.enterprises.count(),
+        store.edges.count(),
+        store.links.count(),
     )
 
-    edge_stub = {
-        "logicalId": logical_id,
-        "name": stub_match.get("name", f"Edge {logical_id}") if stub_match else f"Edge {logical_id}",
-        "alertsEnabled": stub_match.get("alertsEnabled", True) if stub_match else True,
-    }
+    yield
 
-    if path.endswith("/edges/"):
-        return {
-            "data": [
-                {
-                    "logicalId": stub["edgeLogicalId"],
-                    "name": stub.get("name", edge_stub["name"]),
-                    "alertsEnabled": stub.get("alertsEnabled", True),
-                }
-                for stub in STUB_EDGES
-                if stub.get("enterpriseLogicalId") == enterprise_id
-            ],
-        }
-
-    if path.endswith("/deviceSettings"):
-        return {"edge": edge_stub, "deviceSettings": {"lan": [], "wan": []}}
-
-    if path.endswith("/qos"):
-        return {"edge": edge_stub, "qos": {"rules": []}}
-
-    if path.endswith("/applications") or "/applications/" in path:
-        return {"_href": path, "total": 1, "data": [{"id": "app-1", "name": "Default App"}]}
-
-    if "healthStats/timeSeries" in path:
-        return {
-            "_href": path,
-            "total": 1,
-            "series": [
-                {"time": 0, "cpuPct": 20, "memoryPct": 50, "tunnelCount": 3, "flowCount": 150}
-            ],
-        }
-
-    if "healthStats" in path:
-        return {
-            "_href": path,
-            "total": 1,
-            "tunnelCount": {"min": 2, "max": 4, "average": 3},
-            "tunnelCountV6": {"min": 0, "max": 0, "average": 0},
-            "memoryPct": {"min": 42.1, "max": 65.5, "average": 54.3},
-            "flowCount": {"min": 120, "max": 240, "average": 180},
-            "cpuPct": {"min": 12.5, "max": 48.3, "average": 28.9},
-            "cpuCoreTemp": {"min": 55.0, "max": 73.2, "average": 64.8},
-            "handoffQueueDrops": {"min": 0, "max": 2, "average": 0.1},
-        }
-
-    if "linkStats/timeSeries" in path or "flowStats/timeSeries" in path or "pathStats/timeSeries" in path:
-        return {
-            "_href": path,
-            "total": 1,
-            "series": [
-                {"time": 0, "txBytes": 1024, "rxBytes": 2048, "latencyMs": 15, "lossPct": 0.1, "jitterMs": 1.2}
-            ],
-        }
-
-    if "linkStats" in path or "flowStats" in path or "pathStats" in path:
-        return {
-            "_href": path,
-            "total": 1,
-            "stats": [
-                {"link": "link-1", "txBytes": 1024, "rxBytes": 2048, "latencyMs": 15, "lossPct": 0.1, "jitterMs": 1.2}
-            ],
-        }
-
-    if "nonSdWanTunnelStatus" in path:
-        return {
-            "_href": path,
-            "total": 1,
-            "data": [
-                {"name": "vpn-1", "status": "UP", "peer": "198.51.100.1", "uptimeSec": 3600}
-            ],
-        }
-
-    # Default detail payload
-    return edge_stub
+    # Shutdown
+    log.info("Shutting down VCO API Simulator")
 
 
-def _render_custom_seed(template: Any, path_params: Dict[str, Any]) -> Any:
-    """Deep-copy and fill a template payload with path param values."""
-    data = copy.deepcopy(template)
-
-    def _fill(value: Any) -> Any:
-        if isinstance(value, str):
-            return value.format(**path_params)
-        if isinstance(value, list):
-            return [_fill(v) for v in value]
-        if isinstance(value, dict):
-            return {k: _fill(v) for k, v in value.items()}
-        return value
-
-    return _fill(data)
-
-
-def seed_store() -> None:
-    """Seed the in-memory store with deterministic dummy data for GETs."""
-    for path, path_item in spec.get("paths", {}).items():
-        path_params_names = _extract_path_params(path)
-        base_path_params = {name: SAMPLE_IDS.get(name, "sample-value") for name in path_params_names}
-        for method, operation in path_item.items():
-            if method in {"parameters"}:
-                continue
-            if method.lower() != "get":
-                continue
-
-            # Seed all edge-specific GET endpoints for each stub edge.
-            if "/edges/" in path and "edgeLogicalId" in path_params_names:
-                for stub in STUB_EDGES:
-                    if "enterpriseLogicalId" in path_params_names and stub["enterpriseLogicalId"] != base_path_params.get("enterpriseLogicalId", stub["enterpriseLogicalId"]):
-                        pass  # allow multiple enterprises; will set per stub below
-                    path_params = dict(base_path_params)
-                    path_params["enterpriseLogicalId"] = stub["enterpriseLogicalId"]
-                    path_params["edgeLogicalId"] = stub["edgeLogicalId"]
-                    if path in CUSTOM_SEEDS:
-                        payload = _render_custom_seed(CUSTOM_SEEDS[path], path_params)
-                    else:
-                        payload = _edge_default_payload(path, path_params)
-                    store.set(path, "resource", path_params, payload)
-                continue
-
-            if path in CUSTOM_SEEDS:
-                payload = _render_custom_seed(CUSTOM_SEEDS[path], base_path_params)
-                store.set(path, "resource", base_path_params, payload)
-                continue
-
-            if "/edges/" in path:
-                payload = _edge_default_payload(path, base_path_params)
-                store.set(path, "resource", base_path_params, payload)
-                continue
-
-            response_schema, status_code = _choose_response_schema(operation)
-            if not response_schema or status_code == 204:
-                continue
-            payload = example_from_schema(response_schema, resolver)
-            if payload is None:
-                continue
-            payload = _inject_known_ids(payload, base_path_params)
-            store.set(path, "resource", base_path_params, payload)
-
-
-def register_routes() -> None:
-    for path, path_item in spec.get("paths", {}).items():
-        path_level_params = path_item.get("parameters", [])
-        for method, operation in path_item.items():
-            if method == "parameters":
-                continue
-
-            all_params = path_level_params + operation.get("parameters", [])
-            path_params = [p for p in all_params if p.get("in") == "path"]
-            query_params = [p for p in all_params if p.get("in") == "query"]
-
-            response_schema, status_code = _choose_response_schema(operation)
-            endpoint = _build_endpoint(
-                path,
-                method,
-                operation,
-                path_params,
-                query_params,
-                response_schema,
-                status_code,
-            )
-            app.add_api_route(
-                path,
-                endpoint,
-                methods=[method.upper()],
-                status_code=status_code,
-                name=operation.get("operationId") or f"{method}_{path}",
-                tags=operation.get("tags") or [],
-            )
-
-
-@app.on_event("startup")
-async def _bootstrap() -> None:
-    app.openapi_schema = spec
-    app.openapi = lambda: spec
-    register_routes()
-    seed_store()
-    log.info("VCO simulator ready with %s paths", len(spec.get("paths", {})))
+# Create FastAPI app
+settings = get_settings()
+app = FastAPI(
+    title="VCO API Simulator",
+    version="0.2.0",
+    description="Mock implementation of the Arista VeloCloud Orchestrator API (V1 + V2)",
+    lifespan=lifespan,
+)
 
 
 @app.get("/health")
 async def health() -> Dict[str, str]:
+    """Health check endpoint."""
     return {"status": "ok"}
+
+
+@app.get("/status")
+async def status() -> Dict[str, Any]:
+    """Status endpoint showing loaded data."""
+    store = get_store()
+    return {
+        "status": "ok",
+        "data": {
+            "enterprises": store.enterprises.count(),
+            "edges": store.edges.count(),
+            "links": store.links.count(),
+        }
+    }
+
+
+# Support legacy JSON-RPC endpoint at /portal/
+@app.post("/portal/")
+async def jsonrpc_portal(request: Request) -> JSONResponse:
+    """Legacy JSON-RPC endpoint."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    method = body.get("method", "")
+    params = body.get("params", {})
+    req_id = body.get("id", 1)
+
+    # Return a helpful message pointing to REST endpoints
+    return JSONResponse({
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "result": {"message": f"Method {method} - use REST endpoints instead"},
+    })
