@@ -239,3 +239,5 @@ VC-SD-WAN-6.4-v2.json
 
 # State persistence
 state.json
+
+vco_api_sim.egg-info/
