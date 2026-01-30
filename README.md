@@ -9,6 +9,7 @@ A comprehensive FastAPI + Pydantic simulator for the Arista VeloCloud Orchestrat
 - **Stateful Relationships**: Maintains proper entity relationships (Enterprise → Edge → Link)
 - **Time Series Data**: Generates realistic time series for health stats, link stats, and flow stats
 - **Configurable Seeding**: Control the number of enterprises, edges, and links via environment variables
+- **Persistent Enterprise IDs**: Enterprise logical IDs are preserved between restarts via a state file
 - **Dynamic Route Generation**: Routes are generated from OpenAPI specs at startup
 
 ## Quick Start
@@ -109,6 +110,7 @@ Configure the simulator using environment variables or a `.env` file:
 | `VCO_SEED_ENTERPRISES` | `2` | Number of enterprises to seed |
 | `VCO_SEED_EDGES` | `5` | Number of edges per enterprise |
 | `VCO_SEED_LINKS` | `2` | Number of WAN links per edge |
+| `VCO_STATE_FILE` | `state.json` | Path to state file for persisting enterprise IDs |
 | `VCO_HOST` | `0.0.0.0` | Server bind host |
 | `VCO_PORT` | `8000` | Server bind port |
 | `VCO_DEBUG` | `false` | Enable debug mode |
@@ -166,6 +168,7 @@ Enterprise (Customer)
 app/
 ├── main.py                 # FastAPI application entry point
 ├── config.py               # Configuration and environment variables
+├── state.py                # State persistence for enterprise IDs
 ├── models/                 # Pydantic models
 │   ├── base.py             # Base models and mixins
 │   ├── enterprise.py       # Enterprise/Customer model
@@ -228,7 +231,7 @@ All authentication endpoints accept any credentials and return success. No actua
 
 ### Data Persistence
 
-Data is stored in-memory only. Restarting the server resets all data to the seeded state.
+Data is stored in-memory and reset on restart, with one exception: **enterprise logical IDs are persisted** to `state.json` (configurable via `VCO_STATE_FILE`). This ensures enterprise IDs remain stable across restarts while edge and link data is regenerated fresh each time.
 
 ### Response Generation
 

@@ -8,6 +8,7 @@ from app.generators.factory import RealisticGenerator
 from app.models.edge import Edge, EdgeState
 from app.models.enterprise import Enterprise
 from app.models.link import Link, LinkState
+from app.state import load_state, save_state
 from app.store.relationships import get_store
 
 if TYPE_CHECKING:
@@ -16,16 +17,25 @@ if TYPE_CHECKING:
 log = logging.getLogger("vco-sim.seed")
 
 
-def seed_enterprises(store: DataStore, count: int) -> list[Enterprise]:
-    """Seed enterprise entities."""
+def seed_enterprises(
+    store: DataStore,
+    count: int,
+    persisted_ids: list[str] | None = None
+) -> list[Enterprise]:
+    """Seed enterprise entities, using persisted IDs when available."""
     enterprises = []
 
     for i in range(count):
-        ent = Enterprise(
-            name=RealisticGenerator.enterprise_name(),
-            network_id=1,
-            alerts_enabled=True,
-        )
+        # Use persisted ID if available, otherwise let model generate
+        kwargs = {
+            "name": RealisticGenerator.enterprise_name(),
+            "network_id": 1,
+            "alerts_enabled": True,
+        }
+        if persisted_ids and i < len(persisted_ids):
+            kwargs["logical_id"] = persisted_ids[i]
+
+        ent = Enterprise(**kwargs)
         store.enterprises.create(ent)
         enterprises.append(ent)
         log.debug("Created enterprise: %s (%s)", ent.name, ent.logical_id)
@@ -109,6 +119,9 @@ def seed_all() -> None:
     settings = get_settings()
     store = get_store()
 
+    # Load persisted state
+    state = load_state(settings.state_file_path)
+
     log.info(
         "Seeding data: %d enterprises, %d edges each, %d links each",
         settings.seed_enterprises,
@@ -116,12 +129,20 @@ def seed_all() -> None:
         settings.seed_links_per_edge,
     )
 
-    enterprises = seed_enterprises(store, settings.seed_enterprises)
+    enterprises = seed_enterprises(
+        store,
+        settings.seed_enterprises,
+        persisted_ids=state.enterprise_logical_ids
+    )
 
     for ent in enterprises:
         edges = seed_edges(store, ent, settings.seed_edges_per_enterprise)
         for edge in edges:
             seed_links(store, edge, settings.seed_links_per_edge)
+
+    # Save updated state (capture any new enterprise IDs)
+    state.enterprise_logical_ids = [e.logical_id for e in enterprises]
+    save_state(settings.state_file_path, state)
 
     log.info(
         "Seeding complete: %d enterprises, %d edges, %d links",

@@ -46,6 +46,13 @@ class Settings(BaseSettings):
         description="Number of links per edge to seed"
     )
 
+    # State persistence
+    state_file_path: Path = Field(
+        default=Path("state.json"),
+        alias="VCO_STATE_FILE",
+        description="Path to state file for persisting enterprise IDs"
+    )
+
     # Server settings
     host: str = Field(default="0.0.0.0", alias="VCO_HOST")
     port: int = Field(default=8000, alias="VCO_PORT")
