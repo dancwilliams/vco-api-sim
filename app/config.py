@@ -36,7 +36,7 @@ class Settings(BaseSettings):
         description="Number of enterprises to seed"
     )
     seed_edges_per_enterprise: int = Field(
-        default=5,
+        default=10,
         alias="VCO_SEED_EDGES",
         description="Number of edges per enterprise to seed"
     )

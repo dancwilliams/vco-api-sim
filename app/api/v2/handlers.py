@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+from app.api.v2.response_builder import SpecResponseBuilder
 from app.generators.factory import RealisticGenerator
 from app.generators.schema_generator import SchemaGenerator
 from app.specs.resolver import SchemaResolver
@@ -22,6 +23,7 @@ class V2Handler:
         self.spec = spec
         self.resolver = SchemaResolver(spec)
         self.generator = SchemaGenerator(spec)
+        self.response_builder = SpecResponseBuilder(spec, self.resolver)
         self.store = get_store()
 
     async def handle_get(
@@ -126,6 +128,8 @@ class V2Handler:
                     return self._get_edge_link_stats(edge, path, request)
                 if "flowStats" in path:
                     return self._get_edge_flow_stats(edge, path, request)
+                if "deviceSettings" in path:
+                    return self._get_edge_device_settings(edge, path)
                 # Return edge details
                 return JSONResponse(edge.to_v2_dict())
 
@@ -157,6 +161,69 @@ class V2Handler:
             "metaData": {"more": False}
         })
 
+    def _parse_time_range(self, request: Request) -> tuple[datetime, datetime, int]:
+        """
+        Parse start, end time, and interval from query parameters.
+
+        Supports:
+        - Unix timestamp in milliseconds (e.g., ?start=1234567890000&end=1234567900000)
+        - ISO 8601 format (e.g., ?start=2024-01-30T12:00:00Z&end=2024-01-30T18:00:00Z)
+        - interval in minutes (e.g., ?interval=5)
+
+        Defaults to last 1 hour with 5-minute intervals if not provided.
+        """
+        # Default to last 1 hour
+        end = datetime.utcnow()
+        start = end - timedelta(hours=1)
+        interval_minutes = 5
+
+        # Parse query parameters
+        start_param = request.query_params.get("start")
+        end_param = request.query_params.get("end")
+        interval_param = request.query_params.get("interval")
+
+        try:
+            if end_param:
+                # Try parsing as Unix timestamp in milliseconds
+                if end_param.isdigit():
+                    end = datetime.utcfromtimestamp(int(end_param) / 1000.0)
+                else:
+                    # Try parsing as ISO 8601
+                    # Remove 'Z' suffix if present and parse
+                    end_param_clean = end_param.rstrip('Z')
+                    end = datetime.fromisoformat(end_param_clean)
+
+            if start_param:
+                # Try parsing as Unix timestamp in milliseconds
+                if start_param.isdigit():
+                    start = datetime.utcfromtimestamp(int(start_param) / 1000.0)
+                else:
+                    # Try parsing as ISO 8601
+                    start_param_clean = start_param.rstrip('Z')
+                    start = datetime.fromisoformat(start_param_clean)
+            elif end_param:
+                # If only end is specified, default start to 1 hour before end
+                start = end - timedelta(hours=1)
+
+            if interval_param and interval_param.isdigit():
+                interval_minutes = int(interval_param)
+                # Clamp interval to reasonable values (1-60 minutes)
+                interval_minutes = max(1, min(60, interval_minutes))
+
+        except (ValueError, OSError) as e:
+            log.warning(f"Failed to parse time parameters: {e}. Using defaults.")
+            # Fall back to defaults on error
+            end = datetime.utcnow()
+            start = end - timedelta(hours=1)
+            interval_minutes = 5
+
+        # Validate that start is before end
+        if start >= end:
+            log.warning(f"Start time {start} is not before end time {end}. Swapping.")
+            start, end = end - timedelta(hours=1), start
+
+        return start, end, interval_minutes
+
     def _get_edge_health_stats(
         self,
         edge,
@@ -167,25 +234,23 @@ class V2Handler:
         is_time_series = "timeSeries" in path
 
         if is_time_series:
-            end = datetime.utcnow()
-            start = end - timedelta(hours=1)
-            series = RealisticGenerator.time_series(start, end, metric_type="health")
-            return JSONResponse({
-                "_href": path,
-                "total": len(series),
-                "series": series,
-            })
+            start, end, interval = self._parse_time_range(request)
+            series = RealisticGenerator.time_series(
+                start, end, interval_minutes=interval, metric_type="health"
+            )
+            # Build spec-compliant response (EdgeHealthStatsSeriesSchema)
+            response = self.response_builder.build_health_stats_series_response(series, path)
+            return JSONResponse(response)
 
-        # Aggregate stats
+        # Aggregate stats - build using response builder for consistency
         edge_state = edge.edge_state
         healthy = (edge_state.value if hasattr(edge_state, 'value') else edge_state) == "CONNECTED"
-        return JSONResponse({
-            "_href": path,
+        health_data = {
             "total": 1,
             "tunnelCount": RealisticGenerator.min_max_avg(
                 RealisticGenerator.tunnel_count()
             ),
-            "tunnelCountV6": {"min": 0, "max": 0, "average": 0},
+            "tunnelCountV6": {"min": 0.0, "max": 0.0, "average": 0.0},
             "memoryPct": RealisticGenerator.min_max_avg(
                 RealisticGenerator.memory_pct(healthy)
             ),
@@ -197,7 +262,9 @@ class V2Handler:
             ),
             "cpuCoreTemp": RealisticGenerator.min_max_avg(65.0),
             "handoffQueueDrops": RealisticGenerator.min_max_avg(0.1),
-        })
+        }
+        response = self.response_builder.build_health_stats_response(health_data, path)
+        return JSONResponse(response)
 
     def _get_edge_link_stats(
         self,
@@ -209,33 +276,46 @@ class V2Handler:
         is_time_series = "timeSeries" in path
         links = self.store.get_edge_links(edge.logical_id)
 
-        if is_time_series:
-            end = datetime.utcnow()
-            start = end - timedelta(hours=1)
-            series = RealisticGenerator.time_series(start, end, metric_type="link")
-            return JSONResponse({
-                "_href": path,
-                "total": len(series),
-                "series": series,
-            })
-
         edge_state = edge.edge_state
         healthy = (edge_state.value if hasattr(edge_state, 'value') else edge_state) == "CONNECTED"
-        return JSONResponse({
-            "_href": path,
-            "total": len(links) or 1,
-            "stats": [
-                {
-                    "link": link.name if links else "link-1",
-                    "txBytes": RealisticGenerator.bytes_transferred(),
-                    "rxBytes": RealisticGenerator.bytes_transferred(),
-                    "latencyMs": RealisticGenerator.latency_ms(healthy),
-                    "jitterMs": RealisticGenerator.jitter_ms(healthy),
-                    "lossPct": RealisticGenerator.loss_pct(healthy),
-                }
-                for link in (links or [type("Link", (), {"name": "link-1"})()])
-            ],
-        })
+
+        # Build links data for response builder
+        links_data = []
+        for link in links:
+            links_data.append({
+                "logicalId": link.logical_id,
+                "name": link.name,
+                "interface": link.interface,
+                "ipAddress": link.ip_address,
+                "isp": link.isp,
+                "linkState": link.link_state.value if hasattr(link.link_state, 'value') else link.link_state,
+                "networkType": link.link_type.value if hasattr(link.link_type, 'value') else "WIRED",
+            })
+
+        # Provide default if no links
+        if not links_data:
+            links_data = [{"logicalId": "default", "name": "link-1", "interface": "GE1"}]
+
+        if is_time_series:
+            start, end, interval = self._parse_time_range(request)
+            series = RealisticGenerator.time_series(
+                start, end, interval_minutes=interval, metric_type="link"
+            )
+            # Build spec-compliant response (array of LinkStatsSeriesRecord)
+            response = self.response_builder.build_link_stats_series_response(series, links_data)
+            return JSONResponse(response)
+
+        # Build aggregate stats with traffic data
+        for link_data in links_data:
+            link_data["txBytes"] = RealisticGenerator.bytes_transferred()
+            link_data["rxBytes"] = RealisticGenerator.bytes_transferred()
+            link_data["latencyMs"] = RealisticGenerator.latency_ms(healthy)
+            link_data["jitterMs"] = RealisticGenerator.jitter_ms(healthy)
+            link_data["lossPct"] = RealisticGenerator.loss_pct(healthy)
+
+        # Build spec-compliant response (array directly)
+        response = self.response_builder.build_link_stats_response(links_data)
+        return JSONResponse(response)
 
     def _get_edge_flow_stats(
         self,
@@ -243,20 +323,78 @@ class V2Handler:
         path: str,
         request: Request
     ) -> JSONResponse:
-        """Get edge flow statistics."""
-        return JSONResponse({
-            "_href": path,
-            "total": 1,
-            "data": [
-                {
-                    "application": "Web",
-                    "bytesTx": RealisticGenerator.bytes_transferred(),
-                    "bytesRx": RealisticGenerator.bytes_transferred(),
-                    "packetsTx": 10000,
-                    "packetsRx": 15000,
-                }
-            ],
-        })
+        """Get edge flow statistics including top talkers.
+
+        Supports query parameters:
+        - groupBy: Field to group by (destFQDN, sourceIP, application, etc.)
+        - sortBy: Field:direction to sort by (e.g., flowCount:DESC)
+        - limit: Number of results to return (default 10)
+        - start/end: Time range (currently ignored, returns current snapshot)
+        """
+        # Parse query parameters
+        group_by = request.query_params.get("groupBy", "application")
+        sort_by_param = request.query_params.get("sortBy", "flowCount:DESC")
+        limit_param = request.query_params.get("limit", "10")
+
+        # Parse sortBy (format: "field:direction" or just "field")
+        if ":" in sort_by_param:
+            sort_by, sort_order = sort_by_param.split(":", 1)
+        else:
+            sort_by = sort_by_param
+            sort_order = "DESC"
+
+        # Parse limit
+        try:
+            limit = int(limit_param)
+            limit = max(1, min(limit, 100))  # Clamp to reasonable range
+        except ValueError:
+            limit = 10
+
+        # Generate top talker data
+        data = RealisticGenerator.top_talkers(
+            group_by=group_by,
+            limit=limit,
+            sort_by=sort_by,
+            sort_order=sort_order
+        )
+
+        # Build spec-compliant response (array directly, not wrapped)
+        response = self.response_builder.build_flow_stats_response(data)
+        return JSONResponse(response)
+
+    def _get_edge_device_settings(
+        self,
+        edge,
+        path: str,
+    ) -> JSONResponse:
+        """Get edge device settings including WAN link configuration."""
+        links = self.store.get_edge_links(edge.logical_id)
+
+        # Convert links to dict format for response builder
+        links_data = [
+            {
+                "logicalId": link.logical_id,
+                "name": link.name,
+                "interface": link.interface,
+                "ipAddress": link.ip_address,
+                "isp": link.isp,
+                "linkState": link.link_state.value if hasattr(link.link_state, 'value') else link.link_state,
+                "upstreamMbps": link.upstream_mbps,
+                "downstreamMbps": link.downstream_mbps,
+            }
+            for link in links
+        ]
+
+        edge_data = {
+            "logicalId": edge.logical_id,
+            "name": edge.name,
+            "modelNumber": edge.model_number,
+            "softwareVersion": edge.software_version,
+        }
+
+        # Build spec-compliant response (BaseDeviceSettings)
+        response = self.response_builder.build_device_settings_response(edge_data, links_data, path)
+        return JSONResponse(response)
 
     def _get_enterprise_events(self, enterprise_id: str) -> JSONResponse:
         """Get enterprise events."""

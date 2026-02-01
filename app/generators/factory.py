@@ -16,22 +16,65 @@ class RealisticGenerator:
     # Common ISPs
     ISPS = ["AT&T", "Verizon", "Comcast", "Spectrum", "CenturyLink", "Cox", "Frontier"]
 
+    # Common top talker destinations (FQDNs)
+    TOP_TALKER_FQDNS = [
+        "login.microsoftonline.com",
+        "outlook.office365.com",
+        "teams.microsoft.com",
+        "graph.microsoft.com",
+        "zoom.us",
+        "salesforce.com",
+        "aws.amazon.com",
+        "googleapis.com",
+        "slack.com",
+        "github.com",
+        "okta.com",
+        "dropbox.com",
+        "box.com",
+        "servicenow.com",
+        "workday.com",
+        "cdn.cloudflare.net",
+        "akamaiedge.net",
+        "s3.amazonaws.com",
+        "blob.core.windows.net",
+        "sharepoint.com",
+    ]
+
+    # Common applications for flow stats
+    TOP_APPLICATIONS = [
+        "Microsoft 365",
+        "Zoom",
+        "Salesforce",
+        "AWS",
+        "Google Workspace",
+        "Slack",
+        "GitHub",
+        "Okta",
+        "ServiceNow",
+        "Webex",
+        "Box",
+        "Dropbox",
+        "SAP",
+        "Workday",
+        "Generic HTTPS",
+    ]
+
     # Edge model numbers
     EDGE_MODELS = ["edge510", "edge520", "edge540", "edge610", "edge620", "edge640",
                    "edge840", "edge1000", "edge2000", "edge3800"]
 
-    # US cities for realistic locations
+    # US cities for realistic locations with airport codes
     US_CITIES = [
-        ("Austin", "TX", "US", 30.2672, -97.7431),
-        ("Denver", "CO", "US", 39.7392, -104.9903),
-        ("Seattle", "WA", "US", 47.6062, -122.3321),
-        ("New York", "NY", "US", 40.7128, -74.0060),
-        ("Los Angeles", "CA", "US", 34.0522, -118.2437),
-        ("Chicago", "IL", "US", 41.8781, -87.6298),
-        ("Atlanta", "GA", "US", 33.7490, -84.3880),
-        ("Dallas", "TX", "US", 32.7767, -96.7970),
-        ("Phoenix", "AZ", "US", 33.4484, -112.0740),
-        ("Boston", "MA", "US", 42.3601, -71.0589),
+        ("Austin", "TX", "US", 30.2672, -97.7431, "AUS"),
+        ("Denver", "CO", "US", 39.7392, -104.9903, "DEN"),
+        ("Seattle", "WA", "US", 47.6062, -122.3321, "SEA"),
+        ("New York", "NY", "US", 40.7128, -74.0060, "JFK"),
+        ("Los Angeles", "CA", "US", 34.0522, -118.2437, "LAX"),
+        ("Chicago", "IL", "US", 41.8781, -87.6298, "ORD"),
+        ("Atlanta", "GA", "US", 33.7490, -84.3880, "ATL"),
+        ("Dallas", "TX", "US", 32.7767, -96.7970, "DFW"),
+        ("Phoenix", "AZ", "US", 33.4484, -112.0740, "PHX"),
+        ("Boston", "MA", "US", 42.3601, -71.0589, "BOS"),
     ]
 
     @classmethod
@@ -49,7 +92,7 @@ class RealisticGenerator:
     @classmethod
     def location(cls) -> Dict[str, Any]:
         """Generate random US location."""
-        city, state, country, lat, lon = random.choice(cls.US_CITIES)
+        city, state, country, lat, lon, airport_code = random.choice(cls.US_CITIES)
         return {
             "city": city,
             "state": state,
@@ -57,7 +100,13 @@ class RealisticGenerator:
             "latitude": lat + random.uniform(-0.1, 0.1),
             "longitude": lon + random.uniform(-0.1, 0.1),
             "postal_code": fake.zipcode(),
+            "airport_code": airport_code,
         }
+
+    @classmethod
+    def static_edge_name(cls, airport_code: str) -> str:
+        """Generate static edge name from airport code."""
+        return f"R{airport_code}01"
 
     @classmethod
     def ip_address(cls, public: bool = True) -> str:
@@ -177,11 +226,78 @@ class RealisticGenerator:
     @classmethod
     def min_max_avg(cls, base: float, variance: float = 0.2) -> Dict[str, float]:
         """Generate min/max/average structure."""
-        min_val = base * (1 - variance)
-        max_val = base * (1 + variance)
-        avg_val = base
+        min_val = float(base) * (1 - variance)
+        max_val = float(base) * (1 + variance)
+        avg_val = float(base)
         return {
-            "min": round(min_val, 2),
-            "max": round(max_val, 2),
-            "average": round(avg_val, 2),
+            "min": float(round(min_val, 2)),
+            "max": float(round(max_val, 2)),
+            "average": float(round(avg_val, 2)),
         }
+
+    @classmethod
+    def top_talkers(
+        cls,
+        group_by: str = "destFQDN",
+        limit: int = 10,
+        sort_by: str = "flowCount",
+        sort_order: str = "DESC"
+    ) -> List[Dict[str, Any]]:
+        """Generate realistic top talker flow statistics.
+
+        Args:
+            group_by: Field to group by (destFQDN, sourceIP, application, etc.)
+            limit: Number of top talkers to return
+            sort_by: Field to sort by (flowCount, bytesTx, bytesRx, totalBytes)
+            sort_order: Sort direction (DESC or ASC)
+
+        Returns:
+            List of top talker entries sorted by the specified field
+        """
+        entries = []
+
+        # Select source data based on groupBy
+        if group_by in ("destFQDN", "destDomain", "fqdn", "domain"):
+            items = random.sample(cls.TOP_TALKER_FQDNS, min(limit + 5, len(cls.TOP_TALKER_FQDNS)))
+            key_field = "destFQDN"
+        elif group_by in ("application", "app"):
+            items = random.sample(cls.TOP_APPLICATIONS, min(limit + 5, len(cls.TOP_APPLICATIONS)))
+            key_field = "application"
+        elif group_by in ("sourceIP", "srcIP"):
+            items = [fake.ipv4_private() for _ in range(limit + 5)]
+            key_field = "sourceIP"
+        elif group_by in ("destIP", "dstIP"):
+            items = [fake.ipv4_public() for _ in range(limit + 5)]
+            key_field = "destIP"
+        else:
+            # Default to destFQDN
+            items = random.sample(cls.TOP_TALKER_FQDNS, min(limit + 5, len(cls.TOP_TALKER_FQDNS)))
+            key_field = group_by
+
+        for item in items:
+            # Generate realistic traffic metrics with varying volumes
+            # Use exponential distribution for realistic "long tail" traffic patterns
+            base_flows = int(random.expovariate(1/500) + 10)
+            base_bytes = int(random.expovariate(1/50_000_000) + 100_000)
+
+            entry = {
+                key_field: item,
+                "flowCount": base_flows,
+                "bytesTx": base_bytes,
+                "bytesRx": int(base_bytes * random.uniform(0.5, 2.0)),
+                "packetsTx": int(base_bytes / random.randint(500, 1500)),
+                "packetsRx": int(base_bytes / random.randint(500, 1500)),
+            }
+            entry["totalBytes"] = entry["bytesTx"] + entry["bytesRx"]
+            entries.append(entry)
+
+        # Determine sort field
+        sort_field = sort_by.split(":")[0] if ":" in sort_by else sort_by
+        if sort_field not in entries[0]:
+            sort_field = "flowCount"
+
+        # Sort entries
+        reverse = sort_order.upper() == "DESC"
+        entries.sort(key=lambda x: x.get(sort_field, 0), reverse=reverse)
+
+        return entries[:limit]

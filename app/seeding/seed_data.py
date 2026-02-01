@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import logging
+import random
 from typing import TYPE_CHECKING
+
+from faker import Faker
 
 from app.config import get_settings
 from app.generators.factory import RealisticGenerator
@@ -15,6 +18,8 @@ if TYPE_CHECKING:
     from app.store.relationships import DataStore
 
 log = logging.getLogger("vco-sim.seed")
+fake = Faker()
+Faker.seed(42)
 
 
 def seed_enterprises(
@@ -46,37 +51,94 @@ def seed_enterprises(
 def seed_edges(
     store: DataStore,
     enterprise: Enterprise,
-    count: int
+    count: int,
+    persisted_edge_ids: list[str] | None = None
 ) -> list[Edge]:
-    """Seed edge entities for an enterprise."""
+    """Seed edge entities for an enterprise.
+
+    Creates static edges (one per city in US_CITIES) first, then additional
+    random edges if count exceeds the number of static cities.
+    Static edges use the R{AirportCode}01 naming convention.
+    """
     edges = []
 
-    # Distribution of edge states
-    states = [EdgeState.CONNECTED] * int(count * 0.7)
-    states += [EdgeState.DEGRADED] * int(count * 0.2)
-    states += [EdgeState.OFFLINE] * (count - len(states))
+    # Static edges - one per city in US_CITIES order
+    static_count = min(count, len(RealisticGenerator.US_CITIES))
 
-    for i, state in enumerate(states):
-        location = RealisticGenerator.location()
+    for i in range(static_count):
+        city, state_abbr, country, lat, lon, airport_code = RealisticGenerator.US_CITIES[i]
 
-        edge = Edge(
-            name=RealisticGenerator.edge_name(location["city"]),
-            enterprise_id=enterprise.id,
-            enterprise_logical_id=enterprise.logical_id,
-            edge_state=state,
-            model_number=RealisticGenerator.edge_model(),
-            serial_number=RealisticGenerator.serial_number(),
-            site_name=f"{location['city']} Office",
-            city=location["city"],
-            state=location["state"],
-            country=location["country"],
-            postal_code=location["postal_code"],
-            latitude=location["latitude"],
-            longitude=location["longitude"],
-        )
+        # Determine edge state (70% connected, 20% degraded, 10% offline)
+        if i < int(static_count * 0.7):
+            edge_state = EdgeState.CONNECTED
+        elif i < int(static_count * 0.9):
+            edge_state = EdgeState.DEGRADED
+        else:
+            edge_state = EdgeState.OFFLINE
+
+        # Build edge kwargs
+        kwargs = {
+            "name": RealisticGenerator.static_edge_name(airport_code),
+            "enterprise_id": enterprise.id,
+            "enterprise_logical_id": enterprise.logical_id,
+            "edge_state": edge_state,
+            "model_number": RealisticGenerator.edge_model(),
+            "serial_number": RealisticGenerator.serial_number(),
+            "site_name": f"{city} Office",
+            "city": city,
+            "state": state_abbr,
+            "country": country,
+            "postal_code": fake.zipcode(),
+            "latitude": lat + random.uniform(-0.1, 0.1),
+            "longitude": lon + random.uniform(-0.1, 0.1),
+        }
+
+        # Use persisted logical_id if available
+        if persisted_edge_ids and i < len(persisted_edge_ids):
+            kwargs["logical_id"] = persisted_edge_ids[i]
+
+        edge = Edge(**kwargs)
         store.edges.create(edge)
         edges.append(edge)
-        log.debug("Created edge: %s (%s) [%s]", edge.name, edge.logical_id, state.value)
+        log.debug("Created static edge: %s (%s) [%s]", edge.name, edge.logical_id, edge_state.value)
+
+    # Additional random edges if count > static_count
+    for i in range(static_count, count):
+        location = RealisticGenerator.location()
+
+        # Random state distribution for extras
+        rand = random.random()
+        if rand < 0.7:
+            edge_state = EdgeState.CONNECTED
+        elif rand < 0.9:
+            edge_state = EdgeState.DEGRADED
+        else:
+            edge_state = EdgeState.OFFLINE
+
+        kwargs = {
+            "name": RealisticGenerator.edge_name(location["city"]),
+            "enterprise_id": enterprise.id,
+            "enterprise_logical_id": enterprise.logical_id,
+            "edge_state": edge_state,
+            "model_number": RealisticGenerator.edge_model(),
+            "serial_number": RealisticGenerator.serial_number(),
+            "site_name": f"{location['city']} Office",
+            "city": location["city"],
+            "state": location["state"],
+            "country": location["country"],
+            "postal_code": location["postal_code"],
+            "latitude": location["latitude"],
+            "longitude": location["longitude"],
+        }
+
+        # Use persisted logical_id if available for extra edges too
+        if persisted_edge_ids and i < len(persisted_edge_ids):
+            kwargs["logical_id"] = persisted_edge_ids[i]
+
+        edge = Edge(**kwargs)
+        store.edges.create(edge)
+        edges.append(edge)
+        log.debug("Created random edge: %s (%s) [%s]", edge.name, edge.logical_id, edge_state.value)
 
     return edges
 
@@ -135,13 +197,29 @@ def seed_all() -> None:
         persisted_ids=state.enterprise_logical_ids
     )
 
+    # Track edge IDs per enterprise
+    new_edge_ids: dict[str, list[str]] = {}
+
     for ent in enterprises:
-        edges = seed_edges(store, ent, settings.seed_edges_per_enterprise)
+        # Get persisted edge IDs for this enterprise
+        persisted_edge_ids = state.edge_logical_ids.get(ent.logical_id, [])
+
+        edges = seed_edges(
+            store,
+            ent,
+            settings.seed_edges_per_enterprise,
+            persisted_edge_ids=persisted_edge_ids
+        )
+
+        # Store edge IDs for persistence
+        new_edge_ids[ent.logical_id] = [e.logical_id for e in edges]
+
         for edge in edges:
             seed_links(store, edge, settings.seed_links_per_edge)
 
-    # Save updated state (capture any new enterprise IDs)
+    # Save updated state (capture any new enterprise/edge IDs)
     state.enterprise_logical_ids = [e.logical_id for e in enterprises]
+    state.edge_logical_ids = new_edge_ids
     save_state(settings.state_file_path, state)
 
     log.info(
